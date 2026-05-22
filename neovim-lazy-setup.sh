@@ -39,107 +39,108 @@ note_installed() { INSTALLED+=("$1"); }
 note_skipped()   { SKIPPED+=("$1"); }
 
 confirm() {
-    # confirm "prompt text" -> returns 0 for yes, 1 for no
-    local prompt="$1" reply
-    while true; do
-        read -r -p "$prompt [y/N]: " reply || return 1
-        case "${reply,,}" in
-            y|yes) return 0 ;;
-            n|no|"") return 1 ;;
-            *) echo "Please answer y or n." ;;
-        esac
-    done
+  # confirm "prompt text" -> returns 0 for yes, 1 for no
+  local prompt="$1" reply
+  while true; do
+    read -r -p "$prompt [y/N]: " reply || return 1
+    case "${reply,,}" in
+    y|yes) return 0 ;;
+    n|no|"") return 1 ;;
+    *) echo "Please answer y or n." ;;
+    esac
+  done
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
 arch_tag() {
-    # Map uname -m to the tag style used by upstream releases.
-    case "$(uname -m)" in
-        x86_64|amd64) echo "x86_64" ;;
-        aarch64|arm64) echo "aarch64" ;;
-        *) err "Unsupported architecture: $(uname -m)"; exit 1 ;;
-    esac
+  # Map uname -m to the tag style used by upstream releases.
+  case "$(uname -m)" in
+  x86_64|amd64) echo "x86_64" ;;
+  aarch64|arm64) echo "aarch64" ;;
+  *) err "Unsupported architecture: $(uname -m)"; exit 1 ;;
+  esac
 }
 
 # Fetch latest release tag from GitHub API. $1 = "owner/repo".
 gh_latest_tag() {
-    local repo="$1" json tag
-    # Buffer the full response before grep -m1 so curl doesn't get SIGPIPE
-    # when grep exits early (which would trip pipefail and abort the script).
-    json="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest")"
-    tag="$(printf '%s\n' "$json" \
-        | grep -m1 '"tag_name":' \
-        | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
-    if [ -z "$tag" ]; then
-        err "Could not determine latest release tag for ${repo} (API rate-limited or unexpected response)"
-        exit 1
-    fi
-    echo "$tag"
+  local repo="$1" json tag
+  # Buffer the full response before grep -m1 so curl doesn't get SIGPIPE
+  # when grep exits early (which would trip pipefail and abort the script).
+  json="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest")"
+  tag="$(printf '%s\n' "$json" \
+    | grep -m1 '"tag_name":' \
+    | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+  if [ -z "$tag" ]; then
+    err "Could not determine latest release tag for ${repo} (API rate-limited or unexpected response)"
+    exit 1
+  fi
+  echo "$tag"
 }
 
-# Download a URL to a tempfile and echo the path.
+# Download a URL to a temple and echo the path.
 fetch_to_tmp() {
-    local url="$1" dst
-    dst="$(mktemp)"
-    curl -fsSL -o "$dst" "$url"
-    echo "$dst"
+  local url="$1" dst
+  dst="$(mktemp)"
+  curl -fsSL -o "$dst" "$url"
+  echo "$dst"
 }
 
 # Run a command with sudo, but only if not already root.
 sudo_run() {
-    if [ "$(id -u)" -eq 0 ]; then
-        "$@"
-    else
-        sudo "$@"
-    fi
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
 }
 
 # ---------- pre-flight -------------------------------------------------------
 
 if [ "$(id -u)" -eq 0 ]; then
-    err "Please run as your normal user; the script will sudo when needed."
-    exit 1
+  err "Please run as your normal user; the script will sudo when needed."
+  exit 1
 fi
 
 if ! have sudo; then
-    err "sudo not found. Install sudo and add your user to it, then re-run."
-    exit 1
+  err "sudo not found. Install sudo and add your user to it, then re-run."
+  exit 1
 fi
 
 if sudo -n true 2>/dev/null; then
-    : # passwordless sudo available, proceed silently
+  : # passwordless sudo available, proceed silently
 else
-    log "Validating sudo (you may be prompted for your password)..."
-    sudo -v
+  log "Validating sudo (you may be prompted for your password)..."
+  sudo -v
 fi
 # Keep sudo alive in the background while the script runs.
 ( while true; do sudo -n true; sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) &
 SUDO_KEEPALIVE_PID=$!
-trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT
+# shellcheck disable=SC2064  # intentional: expand PID now, not at trap-fire time
+trap "kill '$SUDO_KEEPALIVE_PID' 2>/dev/null || true" EXIT
 
-# Bootstrap curl + ca-certificates before anything else, since the rest of the
+# Bootstrap curl + ca-certificates before anything else first since the rest of the
 # script (and the network reachability check below) depends on curl.
 bootstrap_apt_essentials() {
-    local need=()
-    have curl || need+=(curl)
-    dpkg -s ca-certificates >/dev/null 2>&1 || need+=(ca-certificates)
-    if [ "${#need[@]}" -gt 0 ]; then
-        log "Bootstrapping essentials via apt: ${need[*]}"
-        sudo_run apt-get update -qq
-        sudo_run apt-get install -y "${need[@]}"
-        for pkg in "${need[@]}"; do
-            ok "$pkg installed"
-            note_installed "apt:$pkg"
-        done
-    fi
+  local need=()
+  have curl || need+=(curl)
+  dpkg -s ca-certificates >/dev/null 2>&1 || need+=(ca-certificates)
+  if [ "${#need[@]}" -gt 0 ]; then
+    log "Bootstrapping essentials via apt: ${need[*]}"
+    sudo_run apt-get update -qq
+    sudo_run apt-get install -y "${need[@]}"
+    for pkg in "${need[@]}"; do
+      ok "$pkg installed"
+      note_installed "apt:$pkg"
+    done
+  fi
 }
 
 bootstrap_apt_essentials
 
 if ! curl -fsSL --max-time 10 https://github.com >/dev/null; then
-    err "Cannot reach github.com. Check your network and retry."
-    exit 1
+  err "Cannot reach github.com. Check your network and retry."
+  exit 1
 fi
 
 ARCH="$(arch_tag)"
@@ -148,14 +149,14 @@ ok "Architecture detected: $ARCH"
 # ---------- backup prompts ---------------------------------------------------
 
 backup_if_present() {
-    local path="$1"
-    if [ -e "$path" ]; then
-        local ts backup
-        ts="$(date +%Y%m%d-%H%M%S)"
-        backup="${path}.bak.${ts}"
-        mv "$path" "$backup"
-        ok "Backed up $path -> $backup"
-    fi
+  local path="$1"
+  if [ -e "$path" ]; then
+    local ts backup
+    ts="$(date +%Y%m%d-%H%M%S)"
+    backup="${path}.bak.${ts}"
+    mv "$path" "$backup"
+    ok "Backed up $path -> $backup"
+  fi
 }
 
 log "Checking for existing Neovim state..."
@@ -167,11 +168,11 @@ backup_if_present "$HOME/.cache/nvim"
 # ---------- apt packages -----------------------------------------------------
 
 APT_PKGS=(
-    git curl wget unzip tar
-    build-essential
-    python3 python3-pip python3-venv pipx pipenv
-    sqlite3 libsqlite3-dev
-    ca-certificates gnupg
+  git curl wget unzip tar
+  build-essential
+  python3 python3-pip python3-venv pipx pipenv
+  sqlite3 libsqlite3-dev
+  ca-certificates gnupg
 )
 
 log "Updating apt index..."
@@ -180,56 +181,56 @@ sudo_run apt-get update -qq
 log "Checking apt packages..."
 to_install=()
 for pkg in "${APT_PKGS[@]}"; do
-    if dpkg -s "$pkg" >/dev/null 2>&1; then
-        skip "$pkg (already installed)"
-        note_skipped "apt:$pkg"
-    else
-        to_install+=("$pkg")
-    fi
+  if dpkg -s "$pkg" >/dev/null 2>&1; then
+    skip "$pkg (already installed)"
+    note_skipped "apt:$pkg"
+  else
+    to_install+=("$pkg")
+  fi
 done
 
 if [ "${#to_install[@]}" -gt 0 ]; then
-    log "Installing: ${to_install[*]}"
-    sudo_run apt-get install -y "${to_install[@]}"
-    for pkg in "${to_install[@]}"; do
-        ok "$pkg installed"
-        note_installed "apt:$pkg"
-    done
+  log "Installing: ${to_install[*]}"
+  sudo_run apt-get install -y "${to_install[@]}"
+  for pkg in "${to_install[@]}"; do
+    ok "$pkg installed"
+    note_installed "apt:$pkg"
+  done
 else
-    ok "All apt packages already present."
+  ok "All apt packages already present."
 fi
 
 # Make sure pipx's user bin is on PATH for this session and persistently.
 if have pipx; then
-    pipx ensurepath >/dev/null 2>&1 || true
-    # shellcheck disable=SC1091
-    [ -d "$HOME/.local/bin" ] && export PATH="$HOME/.local/bin:$PATH"
+  pipx ensurepath >/dev/null 2>&1 || true
+  # shellcheck disable=SC1091
+  [ -d "$HOME/.local/bin" ] && export PATH="$HOME/.local/bin:$PATH"
 fi
 
 # ---------- Node.js (NodeSource current LTS) --------------------------------
 
 install_nodejs_lts() {
-    local node_major=24  # Active LTS as of 2026
-    local current_major=""
-    if have node; then
-        current_major="$(node --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/')"
-    fi
+  local node_major=24  # Active LTS as of 2026
+  local current_major=""
+  if have node; then
+    current_major="$(node --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/')"
+  fi
 
-    if [ -n "$current_major" ] && [ "$current_major" -ge "$node_major" ]; then
-        skip "node $(node --version) already installed (>= v${node_major})"
-        note_skipped "nodejs"
-        return 0
-    fi
+  if [ -n "$current_major" ] && [ "$current_major" -ge "$node_major" ]; then
+    skip "node $(node --version) already installed (>= v${node_major})"
+    note_skipped "nodejs"
+    return 0
+  fi
 
-    log "Installing Node.js ${node_major}.x LTS from NodeSource..."
-    local tmp
-    tmp="$(mktemp)"
-    curl -fsSL "https://deb.nodesource.com/setup_${node_major}.x" -o "$tmp"
-    sudo_run bash "$tmp"
-    rm -f "$tmp"
-    sudo_run apt-get install -y nodejs
-    ok "Node.js $(node --version) installed"
-    note_installed "nodejs $(node --version)"
+  log "Installing Node.js ${node_major}.x LTS from NodeSource..."
+  local tmp
+  tmp="$(mktemp)"
+  curl -fsSL "https://deb.nodesource.com/setup_${node_major}.x" -o "$tmp"
+  sudo_run bash "$tmp"
+  rm -f "$tmp"
+  sudo_run apt-get install -y nodejs
+  ok "Node.js $(node --version) installed"
+  note_installed "nodejs $(node --version)"
 }
 
 install_nodejs_lts
@@ -237,158 +238,159 @@ install_nodejs_lts
 # ---------- rustup (system-wide) --------------------------------------------
 
 install_rustup_systemwide() {
-    if have rustc && have cargo; then
-        skip "rustc/cargo already present ($(rustc --version 2>/dev/null || echo unknown))"
-        note_skipped "rustup"
-        return 0
+  if have rustc && have cargo; then
+    skip "rustc/cargo already present ($(rustc --version 2>/dev/null || echo unknown))"
+    note_skipped "rustup"
+    return 0
+  fi
+
+  log "Installing rustup system-wide to /usr/local..."
+  local tmp
+  tmp="$(mktemp -d)"
+  pushd "$tmp" >/dev/null
+  curl -fsSL https://sh.rustup.rs -o rustup-init.sh
+  chmod +x rustup-init.sh
+  # CARGO_HOME and RUSTUP_HOME under /usr/local make it system-wide.
+  sudo_run env \
+    CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    ./rustup-init.sh -y --no-modify-path --default-toolchain stable --profile minimal
+  popd >/dev/null
+  rm -rf "$tmp"
+
+  # Symlink cargo/rustc/rustup into /usr/local/bin so they're on PATH.
+  local bin
+  for bin in cargo rustc rustup rustdoc; do
+    if [ -x "/usr/local/cargo/bin/$bin" ]; then
+      sudo_run ln -sf "/usr/local/cargo/bin/$bin" "/usr/local/bin/$bin"
     fi
+  done
 
-    log "Installing rustup system-wide to /usr/local..."
-    local tmp
-    tmp="$(mktemp -d)"
-    pushd "$tmp" >/dev/null
-    curl -fsSL https://sh.rustup.rs -o rustup-init.sh
-    chmod +x rustup-init.sh
-    # CARGO_HOME and RUSTUP_HOME under /usr/local make it system-wide.
-    sudo_run env \
-        CARGO_HOME=/usr/local/cargo \
-        RUSTUP_HOME=/usr/local/rustup \
-        ./rustup-init.sh -y --no-modify-path --default-toolchain stable --profile minimal
-    popd >/dev/null
-    rm -rf "$tmp"
-
-    # Symlink cargo/rustc/rustup into /usr/local/bin so they're on PATH.
-    for bin in cargo rustc rustup rustdoc; do
-        if [ -x "/usr/local/cargo/bin/$bin" ]; then
-            sudo_run ln -sf "/usr/local/cargo/bin/$bin" "/usr/local/bin/$bin"
-        fi
-    done
-
-    # Persistent env for everyone (CARGO_HOME/RUSTUP_HOME are needed for cargo install --root).
-    sudo_run tee /etc/profile.d/rust-systemwide.sh >/dev/null <<'EOF'
+  # Persistent env for everyone (CARGO_HOME/RUSTUP_HOME are needed for cargo install --root).
+  sudo_run tee /etc/profile.d/rust-systemwide.sh >/dev/null <<'EOF'
 export RUSTUP_HOME=/usr/local/rustup
 export CARGO_HOME=/usr/local/cargo
 EOF
-    sudo_run chmod 644 /etc/profile.d/rust-systemwide.sh
+  sudo_run chmod 644 /etc/profile.d/rust-systemwide.sh
 
-    export RUSTUP_HOME=/usr/local/rustup
-    export CARGO_HOME=/usr/local/cargo
-
-    ok "rustup installed system-wide"
-    note_installed "rustup (system-wide /usr/local)"
+  ok "rustup installed system-wide"
+  note_installed "rustup (system-wide /usr/local)"
 }
 
 install_rustup_systemwide
+export RUSTUP_HOME=/usr/local/rustup
+export CARGO_HOME=/usr/local/cargo
 
 # ---------- Neovim from GitHub releases -------------------------------------
 
 install_neovim() {
-    local desired_tag current
-    desired_tag="$(gh_latest_tag neovim/neovim)"
+  local desired_tag current
+  desired_tag="$(gh_latest_tag neovim/neovim)"
 
-    if have nvim; then
-        current="$(nvim --version | head -n1 | awk '{print $2}')"
-        if [ "$current" = "$desired_tag" ]; then
-            skip "nvim $current already installed"
-            note_skipped "nvim ($current)"
-            return 0
-        else
-            log "nvim $current present; upgrading to $desired_tag..."
-        fi
+  if have nvim; then
+    current="$(nvim --version | head -n1 | awk '{print $2}')"
+    if [ "$current" = "$desired_tag" ]; then
+      skip "nvim $current already installed"
+      note_skipped "nvim ($current)"
+      return 0
     else
-        log "Installing nvim $desired_tag..."
+      log "nvim $current present; upgrading to $desired_tag..."
     fi
+  else
+    log "Installing nvim $desired_tag..."
+  fi
 
-    # Asset naming: v0.10+ uses nvim-linux-x86_64.tar.gz; older used nvim-linux64.tar.gz.
-    local asset
-    if [ "$ARCH" = "x86_64" ]; then
-        asset="nvim-linux-x86_64.tar.gz"
-    else
-        asset="nvim-linux-arm64.tar.gz"
+  # Asset naming: v0.10+ uses nvim-linux-x86_64.tar.gz; older used nvim-linux64.tar.gz.
+  local asset
+  if [ "$ARCH" = "x86_64" ]; then
+    asset="nvim-linux-x86_64.tar.gz"
+  else
+    asset="nvim-linux-arm64.tar.gz"
+  fi
+  local url="https://github.com/neovim/neovim/releases/download/${desired_tag}/${asset}"
+
+  local tarball extract_dir
+  tarball="$(fetch_to_tmp "$url")"
+  extract_dir="$(mktemp -d)"
+  tar -xzf "$tarball" -C "$extract_dir"
+  rm -f "$tarball"
+
+  # The tarball top-level dir varies by version; find it.
+  local top
+  top="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+  if [ -z "$top" ]; then
+    err "Could not find extracted Neovim directory."
+    exit 1
+  fi
+
+  # Merge bin/, share/, lib/ into /usr/local/.
+  local sub
+  for sub in bin share lib; do
+    if [ -d "$top/$sub" ]; then
+      sudo_run cp -a "$top/$sub/." "/usr/local/$sub/"
     fi
-    local url="https://github.com/neovim/neovim/releases/download/${desired_tag}/${asset}"
+  done
+  rm -rf "$extract_dir"
 
-    local tarball extract_dir
-    tarball="$(fetch_to_tmp "$url")"
-    extract_dir="$(mktemp -d)"
-    tar -xzf "$tarball" -C "$extract_dir"
-    rm -f "$tarball"
+  # Register nvim as the system editor/vi/vim via update-alternatives.
+  if have update-alternatives; then
+    sudo_run update-alternatives --install /usr/bin/editor editor /usr/local/bin/nvim 100
+    sudo_run update-alternatives --install /usr/bin/vi     vi     /usr/local/bin/nvim 100
+    sudo_run update-alternatives --install /usr/bin/vim    vim    /usr/local/bin/nvim 100
+    sudo_run update-alternatives --set editor /usr/local/bin/nvim
+    sudo_run update-alternatives --set vi     /usr/local/bin/nvim
+    sudo_run update-alternatives --set vim    /usr/local/bin/nvim
+    ok "Registered nvim as default editor/vi/vim via update-alternatives"
+  fi
 
-    # The tarball top-level dir varies by version; find it.
-    local top
-    top="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d | head -n1)"
-    if [ -z "$top" ]; then
-        err "Could not find extracted Neovim directory."
-        exit 1
-    fi
-
-    # Merge bin/, share/, lib/ into /usr/local/.
-    for sub in bin share lib; do
-        if [ -d "$top/$sub" ]; then
-            sudo_run cp -a "$top/$sub/." "/usr/local/$sub/"
-        fi
-    done
-    rm -rf "$extract_dir"
-
-    # Register nvim as the system editor/vi/vim via update-alternatives.
-    if have update-alternatives; then
-        sudo_run update-alternatives --install /usr/bin/editor editor /usr/local/bin/nvim 100
-        sudo_run update-alternatives --install /usr/bin/vi     vi     /usr/local/bin/nvim 100
-        sudo_run update-alternatives --install /usr/bin/vim    vim    /usr/local/bin/nvim 100
-        sudo_run update-alternatives --set editor /usr/local/bin/nvim
-        sudo_run update-alternatives --set vi     /usr/local/bin/nvim
-        sudo_run update-alternatives --set vim    /usr/local/bin/nvim
-        ok "Registered nvim as default editor/vi/vim via update-alternatives"
-    fi
-
-    ok "nvim $desired_tag installed to /usr/local"
-    note_installed "nvim $desired_tag"
+  ok "nvim $desired_tag installed to /usr/local"
+  note_installed "nvim $desired_tag"
 }
 
 # Generic GitHub-release-to-/usr/local/bin installer for single-binary tools.
 # $1 = repo (owner/name), $2 = command name to check, $3 = function that
 # echoes the asset filename for the latest tag.
 install_gh_binary() {
-    local repo="$1" cmd="$2" asset_fn="$3"
-    if have "$cmd"; then
-        skip "$cmd already installed ($(command -v "$cmd"))"
-        note_skipped "$cmd"
-        return 0
-    fi
-    local tag asset url tmp
-    tag="$(gh_latest_tag "$repo")"
-    asset="$($asset_fn "$tag")"
-    url="https://github.com/${repo}/releases/download/${tag}/${asset}"
-    log "Installing $cmd $tag from $repo..."
-    tmp="$(mktemp -d)"
-    pushd "$tmp" >/dev/null
-    curl -fsSL -o "$asset" "$url"
+  local repo="$1" cmd="$2" asset_fn="$3"
+  if have "$cmd"; then
+    skip "$cmd already installed ($(command -v "$cmd"))"
+    note_skipped "$cmd"
+    return 0
+  fi
+  local tag asset url tmp
+  tag="$(gh_latest_tag "$repo")"
+  asset="$($asset_fn "$tag")"
+  url="https://github.com/${repo}/releases/download/${tag}/${asset}"
+  log "Installing $cmd $tag from $repo..."
+  tmp="$(mktemp -d)"
+  pushd "$tmp" >/dev/null
+  curl -fsSL -o "$asset" "$url"
 
-    case "$asset" in
-        *.tar.gz|*.tgz) tar -xzf "$asset" ;;
-        *.tar.xz)       tar -xJf "$asset" ;;
-        *.zip)          unzip -q "$asset" ;;
-        *)              err "Unknown archive type: $asset"; popd >/dev/null; rm -rf "$tmp"; exit 1 ;;
-    esac
+  case "$asset" in
+  *.tar.gz|*.tgz) tar -xzf "$asset" ;;
+  *.tar.xz)       tar -xJf "$asset" ;;
+  *.zip)          unzip -q "$asset" ;;
+  *)              err "Unknown archive type: $asset"; popd >/dev/null; rm -rf "$tmp"; exit 1 ;;
+  esac
 
-    # Find the binary in the extracted tree and install it.
-    local found
-    found="$(find . -type f -name "$cmd" -perm -u+x | head -n1)"
-    if [ -z "$found" ]; then
-        # Some archives put the binary at the top level without exec bit set yet.
-        found="$(find . -type f -name "$cmd" | head -n1)"
-    fi
-    if [ -z "$found" ]; then
-        err "Could not locate '$cmd' binary in $asset"
-        popd >/dev/null
-        rm -rf "$tmp"
-        exit 1
-    fi
-    sudo_run install -m 0755 "$found" "/usr/local/bin/$cmd"
+  # Find the binary in the extracted tree and install it.
+  local found
+  found="$(find . -type f -name "$cmd" -perm -u+x | head -n1)"
+  if [ -z "$found" ]; then
+    # Some archives put the binary at the top level without an exec bit set yet.
+    found="$(find . -type f -name "$cmd" | head -n1)"
+  fi
+  if [ -z "$found" ]; then
+    err "Could not locate '$cmd' binary in $asset"
     popd >/dev/null
     rm -rf "$tmp"
-    ok "$cmd $tag installed"
-    note_installed "$cmd $tag"
+    exit 1
+  fi
+  sudo_run install -m 0755 "$found" "/usr/local/bin/$cmd"
+  popd >/dev/null
+  rm -rf "$tmp"
+  ok "$cmd $tag installed"
+  note_installed "$cmd $tag"
 }
 
 # Asset name resolvers per project.
@@ -396,35 +398,35 @@ asset_ripgrep()    { echo "ripgrep-${1#v}-${ARCH}-unknown-linux-musl.tar.gz"; }
 asset_fd()         { echo "fd-${1}-${ARCH}-unknown-linux-musl.tar.gz"; }
 asset_fzf()        { echo "fzf-${1#v}-linux_$( [ "$ARCH" = "x86_64" ] && echo amd64 || echo arm64 ).tar.gz"; }
 asset_lazygit()    {
-    local nov="${1#v}"
-    local goarch
-    goarch="$( [ "$ARCH" = "x86_64" ] && echo x86_64 || echo arm64 )"
-    echo "lazygit_${nov}_Linux_${goarch}.tar.gz"
+  local nov="${1#v}"
+  local goarch
+  goarch="$( [ "$ARCH" = "x86_64" ] && echo x86_64 || echo arm64 )"
+  echo "lazygit_${nov}_Linux_${goarch}.tar.gz"
 }
-asset_treesitter() { echo "tree-sitter-linux-$( [ "$ARCH" = "x86_64" ] && echo x64 || echo arm64 ).gz"; }
+asset_treesitter() { echo "tree-sitter-linux-$( [ "$ARCH" = "x86_64" ] && echo x64 || echo arm64 )-${1}.gz"; }
 
 # tree-sitter ships a single gzipped binary, not a tarball — handle separately.
 install_treesitter() {
-    if have tree-sitter; then
-        skip "tree-sitter already installed ($(command -v tree-sitter))"
-        note_skipped "tree-sitter"
-        return 0
-    fi
-    local tag asset url tmp
-    tag="$(gh_latest_tag tree-sitter/tree-sitter)"
-    asset="$(asset_treesitter "$tag")"
-    url="https://github.com/tree-sitter/tree-sitter/releases/download/${tag}/${asset}"
-    log "Installing tree-sitter $tag..."
-    tmp="$(mktemp -d)"
-    pushd "$tmp" >/dev/null
-    curl -fsSL -o "$asset" "$url"
-    gunzip "$asset"
-    local bin="${asset%.gz}"
-    sudo_run install -m 0755 "$bin" /usr/local/bin/tree-sitter
-    popd >/dev/null
-    rm -rf "$tmp"
-    ok "tree-sitter $tag installed"
-    note_installed "tree-sitter $tag"
+  if have tree-sitter; then
+    skip "tree-sitter already installed ($(command -v tree-sitter))"
+    note_skipped "tree-sitter"
+    return 0
+  fi
+  local tag asset url tmp
+  tag="$(gh_latest_tag tree-sitter/tree-sitter)"
+  asset="$(asset_treesitter "$tag")"
+  url="https://github.com/tree-sitter/tree-sitter/releases/download/${tag}/${asset}"
+  log "Installing tree-sitter $tag..."
+  tmp="$(mktemp -d)"
+  pushd "$tmp" >/dev/null
+  curl -fsSL -o "$asset" "$url"
+  gunzip "$asset"
+  local bin="${asset%.gz}"
+  sudo_run install -m 0755 "$bin" /usr/local/bin/tree-sitter
+  popd >/dev/null
+  rm -rf "$tmp"
+  ok "tree-sitter $tag installed"
+  note_installed "tree-sitter $tag"
 }
 
 install_neovim
@@ -437,15 +439,15 @@ install_treesitter
 # ---------- Python provider --------------------------------------------------
 
 install_pynvim() {
-    if pipx list 2>/dev/null | grep -q 'pynvim'; then
-        skip "pynvim already installed via pipx"
-        note_skipped "pynvim"
-        return 0
-    fi
-    log "Installing pynvim via pipx..."
-    pipx install pynvim
-    ok "pynvim installed"
-    note_installed "pynvim (pipx)"
+  if pipx list 2>/dev/null | grep -q 'pynvim'; then
+    skip "pynvim already installed via pipx"
+    note_skipped "pynvim"
+    return 0
+  fi
+  log "Installing pynvim via pipx..."
+  pipx install pynvim
+  ok "pynvim installed"
+  note_installed "pynvim (pipx)"
 }
 
 install_pynvim
@@ -453,15 +455,15 @@ install_pynvim
 # ---------- Node provider ----------------------------------------------------
 
 install_node_neovim() {
-    if npm list -g --depth=0 2>/dev/null | grep -q ' neovim@'; then
-        skip "npm 'neovim' package already installed globally"
-        note_skipped "npm:neovim"
-        return 0
-    fi
-    log "Installing npm 'neovim' package globally..."
-    sudo_run npm install -g neovim
-    ok "npm 'neovim' installed"
-    note_installed "npm:neovim"
+  if npm list -g --depth=0 2>/dev/null | grep -q ' neovim@'; then
+    skip "npm 'neovim' package already installed globally"
+    note_skipped "npm:neovim"
+    return 0
+  fi
+  log "Installing npm 'neovim' package globally..."
+  sudo_run npm install -g neovim
+  ok "npm 'neovim' installed"
+  note_installed "npm:neovim"
 }
 
 install_node_neovim
@@ -469,17 +471,17 @@ install_node_neovim
 # ---------- LazyVim starter --------------------------------------------------
 
 install_starter() {
-    if [ -d "$HOME/.config/nvim" ]; then
-        skip "~/.config/nvim already exists; skipping starter clone"
-        note_skipped "LazyVim starter"
-        return 0
-    fi
-    log "Cloning LazyVim starter to ~/.config/nvim..."
-    mkdir -p "$HOME/.config"
-    git clone --depth=1 https://github.com/LazyVim/starter "$HOME/.config/nvim"
-    rm -rf "$HOME/.config/nvim/.git"
-    ok "LazyVim starter cloned (.git removed)"
-    note_installed "LazyVim starter"
+  if [ -d "$HOME/.config/nvim" ]; then
+    skip "$HOME/.config/nvim already exists; skipping starter clone"
+    note_skipped "LazyVim starter"
+    return 0
+  fi
+  log "Cloning LazyVim starter to ~/.config/nvim..."
+  mkdir -p "$HOME/.config"
+  git clone --depth=1 https://github.com/LazyVim/starter "$HOME/.config/nvim"
+  rm -rf "$HOME/.config/nvim/.git"
+  ok "LazyVim starter cloned (.git removed)"
+  note_installed "LazyVim starter"
 }
 
 install_starter
@@ -487,32 +489,32 @@ install_starter
 # ---------- Pre-pull plugins via headless lazy sync --------------------------
 
 prefetch_plugins() {
-    # Run a single headless nvim Ex command.  Uses `script` to provide a PTY so
-    # plugins that check for a terminal (e.g. lazy.nvim progress UI, blink.cmp
-    # cargo build) don't skip work.  Output is NOT suppressed so failures are
-    # visible — critical for diagnosing bootstrap and compilation errors.
-    _nvim_headless() {
-        local excmd="$1"
-        if have script; then
-            script -qe -c "nvim --headless \"${excmd}\" +qa" /dev/null
-        else
-            nvim --headless "${excmd}" +qa
-        fi
-    }
+  # Run a single headless nvim Ex command.  Uses `script` to provide a PTY, so
+  # plugins that check for a terminal (e.g., lazy.nvim progress UI, blink.cmp
+  # cargo build) don't skip work.  Output is NOT suppressed, so failures are
+  # visible — critical for diagnosing bootstrap and compilation errors.
+  _nvim_headless() {
+    local excmd="$1"
+    if have script; then
+      script -qe -c "nvim --headless \"${excmd}\" +qa" /dev/null
+    else
+      nvim --headless "${excmd}" +qa
+    fi
+  }
 
-    log "Step 1/3 — installing plugins (+Lazy! sync)..."
-    _nvim_headless "+Lazy! sync"
-    ok "Plugin sync complete"
+  log "Step 1/3 — installing plugins (+Lazy! sync)..."
+  _nvim_headless "+Lazy! sync"
+  ok "Plugin sync complete"
 
-    log "Step 2/3 — compiling Tree-sitter parsers (+TSUpdateSync)..."
-    _nvim_headless "+TSUpdateSync"
-    ok "Tree-sitter parsers compiled"
+  log "Step 2/3 — compiling Tree-sitter parsers (+TSUpdateSync)..."
+  _nvim_headless "+TSUpdateSync"
+  ok "Tree-sitter parsers compiled"
 
-    log "Step 3/3 — updating Mason registry (+MasonUpdate)..."
-    _nvim_headless "+MasonUpdate"
-    ok "Mason registry updated"
+  log "Step 3/3 — updating Mason registry (+MasonUpdate)..."
+  _nvim_headless "+MasonUpdate"
+  ok "Mason registry updated"
 
-    note_installed "Lazy plugins (synced + compiled)"
+  note_installed "Lazy plugins (synced + compiled)"
 }
 
 prefetch_plugins
@@ -526,12 +528,12 @@ echo "============================================================"
 echo
 echo "${c_grn}Installed / configured this run:${c_rst}"
 for item in "${INSTALLED[@]}"; do
-    echo "  + $item"
+  echo "  + $item"
 done
 echo
 echo "${c_dim}Already present (skipped):${c_rst}"
 for item in "${SKIPPED[@]}"; do
-    echo "  - $item"
+  echo "  - $item"
 done
 echo
 echo "Next steps:"
