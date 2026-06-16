@@ -506,8 +506,39 @@ prefetch_plugins() {
   _nvim_headless "+Lazy! sync"
   ok "Plugin sync complete"
 
-  log "Step 2/3 — compiling Tree-sitter parsers (+TSUpdateSync)..."
-  _nvim_headless "+TSUpdateSync"
+  log "Step 2/3 — compiling Tree-sitter parsers (nvim-treesitter main)..."
+  # LazyVim now tracks nvim-treesitter's `main` branch (the old `master` repo
+  # was archived 2026-04-03). `main` removed the synchronous `:TSUpdateSync`
+  # command in favour of an async Lua API, so a headless `+TSUpdateSync` now
+  # fails with "Not an editor command". For a bootstrap we must call install()
+  # and block on :wait(), or nvim quits via +qa before any parser compiles.
+  # See the nvim-treesitter README, "synchronous installation in a script
+  # context (bootstrapping)". Requires tree-sitter CLI >= 0.26.1 (installed
+  # above) and a C compiler (build-essential, installed above).
+  local ts_lua
+  ts_lua="$(mktemp --suffix=.lua)"
+  cat >"$ts_lua" <<'LUA'
+-- Resolve the parser list from LazyVim's merged opts; fall back to a core set.
+local langs
+local ok, opts = pcall(function() return LazyVim.opts("nvim-treesitter") end)
+if ok and type(opts) == "table" and type(opts.ensure_installed) == "table" then
+  langs = {}
+  for _, l in ipairs(opts.ensure_installed) do
+    if type(l) == "string" then langs[#langs + 1] = l end
+  end
+end
+if not langs or #langs == 0 then
+  langs = {
+    "bash", "c", "diff", "html", "javascript", "json", "jsonc", "lua",
+    "luadoc", "markdown", "markdown_inline", "python", "query", "regex",
+    "toml", "tsx", "typescript", "vim", "vimdoc", "yaml",
+  }
+end
+-- install() runs asynchronously; block up to 10 minutes for parsers to build.
+require("nvim-treesitter").install(langs):wait(600000)
+LUA
+  _nvim_headless "+luafile $ts_lua"
+  rm -f "$ts_lua"
   ok "Tree-sitter parsers compiled"
 
   log "Step 3/3 — updating Mason registry (+MasonUpdate)..."
