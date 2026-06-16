@@ -78,6 +78,34 @@ gh_latest_tag() {
   echo "$tag"
 }
 
+# Resolve a release asset's real download URL by matching its filename against
+# an extended-regex pattern, via the GitHub API. Unlike hand-building the
+# filename (which 404s the moment upstream renames an asset or changes its
+# version string), this validates the asset actually exists and self-heals
+# across version bumps. Fails loudly with the available asset list on no match.
+# $1 = "owner/repo", $2 = release tag, $3 = ERE matched against the asset name.
+gh_asset_url() {
+  local repo="$1" tag="$2" pattern="$3" json url names
+  json="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/tags/${tag}")"
+  # Match the pattern against the asset basename by anchoring it to the final
+  # path segment of the download URL (strip the leading ^, require a preceding
+  # slash). grep -E honours \. as a literal dot; awk -v would mangle the escape.
+  url="$(printf '%s\n' "$json" \
+    | grep -oE '"browser_download_url": *"[^"]+"' \
+    | sed -E 's/.*"(https[^"]+)".*/\1/' \
+    | grep -E "/${pattern#^}" \
+    | head -n1)"
+  if [ -z "$url" ]; then
+    names="$(printf '%s\n' "$json" \
+      | grep -oE '"name": *"[^"]+"' \
+      | sed -E 's/.*"([^"]+)".*/\1/' \
+      | grep -E '\.' | paste -sd', ' -)"
+    err "No asset matching /${pattern}/ for ${repo} ${tag}. Available: ${names:-<none>}"
+    exit 1
+  fi
+  echo "$url"
+}
+
 # Download a URL to a temple and echo the path.
 fetch_to_tmp() {
   local url="$1" dst
@@ -300,14 +328,11 @@ install_neovim() {
     log "Installing nvim $desired_tag..."
   fi
 
-  # Asset naming: v0.10+ uses nvim-linux-x86_64.tar.gz; older used nvim-linux64.tar.gz.
-  local asset
-  if [ "$ARCH" = "x86_64" ]; then
-    asset="nvim-linux-x86_64.tar.gz"
-  else
-    asset="nvim-linux-arm64.tar.gz"
-  fi
-  local url="https://github.com/neovim/neovim/releases/download/${desired_tag}/${asset}"
+  # Resolve the tarball from the release (v0.10+ uses nvim-linux-<arch>.tar.gz;
+  # the .appimage assets are excluded by anchoring on \.tar\.gz$).
+  local narch url
+  narch="$( [ "$ARCH" = "x86_64" ] && echo x86_64 || echo arm64 )"
+  url="$(gh_asset_url neovim/neovim "$desired_tag" "^nvim-linux-${narch}\.tar\.gz$")"
 
   local tarball extract_dir
   tarball="$(fetch_to_tmp "$url")"
@@ -349,9 +374,9 @@ install_neovim() {
 
 # Generic GitHub-release-to-/usr/local/bin installer for single-binary tools.
 # $1 = repo (owner/name), $2 = command name to check, $3 = function that
-# echoes the asset filename for the latest tag.
+# echoes an ERE pattern matching the asset filename for this arch.
 install_gh_binary() {
-  local repo="$1" cmd="$2" asset_fn="$3"
+  local repo="$1" cmd="$2" pattern_fn="$3"
   if have "$cmd"; then
     skip "$cmd already installed ($(command -v "$cmd"))"
     note_skipped "$cmd"
@@ -359,8 +384,8 @@ install_gh_binary() {
   fi
   local tag asset url tmp
   tag="$(gh_latest_tag "$repo")"
-  asset="$($asset_fn "$tag")"
-  url="https://github.com/${repo}/releases/download/${tag}/${asset}"
+  url="$(gh_asset_url "$repo" "$tag" "$($pattern_fn)")"
+  asset="${url##*/}"
   log "Installing $cmd $tag from $repo..."
   tmp="$(mktemp -d)"
   pushd "$tmp" >/dev/null
@@ -393,17 +418,18 @@ install_gh_binary() {
   note_installed "$cmd $tag"
 }
 
-# Asset name resolvers per project.
-asset_ripgrep()    { echo "ripgrep-${1#v}-${ARCH}-unknown-linux-musl.tar.gz"; }
-asset_fd()         { echo "fd-${1}-${ARCH}-unknown-linux-musl.tar.gz"; }
-asset_fzf()        { echo "fzf-${1#v}-linux_$( [ "$ARCH" = "x86_64" ] && echo amd64 || echo arm64 ).tar.gz"; }
-asset_lazygit()    {
-  local nov="${1#v}"
-  local goarch
-  goarch="$( [ "$ARCH" = "x86_64" ] && echo x86_64 || echo arm64 )"
-  echo "lazygit_${nov}_Linux_${goarch}.tar.gz"
-}
-asset_treesitter() { echo "tree-sitter-linux-$( [ "$ARCH" = "x86_64" ] && echo x64 || echo arm64 )-${1}.gz"; }
+# Asset-name patterns (extended regex), matched against the release's actual
+# asset filenames by gh_asset_url. Version-agnostic on purpose: ".*" spans the
+# version string, so a release bump never breaks the match — only a genuine
+# rename of the stable parts would, and that surfaces as a clear error.
+# ripgrep ships musl for x86_64 but only gnu for aarch64.
+asset_ripgrep()    { echo "^ripgrep-.*-$( [ "$ARCH" = "x86_64" ] && echo x86_64-unknown-linux-musl || echo aarch64-unknown-linux-gnu )\.tar\.gz$"; }
+asset_fd()         { echo "^fd-.*-${ARCH}-unknown-linux-musl\.tar\.gz$"; }
+asset_fzf()        { echo "^fzf-.*-linux_$( [ "$ARCH" = "x86_64" ] && echo amd64 || echo arm64 )\.tar\.gz$"; }
+asset_lazygit()    { echo "^lazygit_.*_linux_$( [ "$ARCH" = "x86_64" ] && echo x86_64 || echo arm64 )\.tar\.gz$"; }
+# tree-sitter ships an unversioned, gzipped single binary (e.g.
+# tree-sitter-linux-x64.gz) — note x64/arm64, not x86_64/aarch64.
+asset_treesitter() { echo "^tree-sitter-linux-$( [ "$ARCH" = "x86_64" ] && echo x64 || echo arm64 )\.gz$"; }
 
 # tree-sitter ships a single gzipped binary, not a tarball — handle separately.
 install_treesitter() {
@@ -414,8 +440,8 @@ install_treesitter() {
   fi
   local tag asset url tmp
   tag="$(gh_latest_tag tree-sitter/tree-sitter)"
-  asset="$(asset_treesitter "$tag")"
-  url="https://github.com/tree-sitter/tree-sitter/releases/download/${tag}/${asset}"
+  url="$(gh_asset_url tree-sitter/tree-sitter "$tag" "$(asset_treesitter)")"
+  asset="${url##*/}"
   log "Installing tree-sitter $tag..."
   tmp="$(mktemp -d)"
   pushd "$tmp" >/dev/null
