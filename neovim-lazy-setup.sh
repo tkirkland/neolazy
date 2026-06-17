@@ -585,11 +585,69 @@ LUA
   rm -f "$ts_lua"
   ok "Tree-sitter parsers compiled"
 
-  log "Step 3/3 — updating Mason registry (+MasonUpdate)..."
+  log "Step 3/4 — updating Mason registry (+MasonUpdate)..."
   _nvim_headless "+MasonUpdate"
   ok "Mason registry updated"
 
+  log "Step 4/4 — installing all Mason tools from the config (blocking)..."
+  # The tool list lives in lua/plugins/mason.lua (ensure_installed). We read it
+  # back via LazyVim.opts and drive mason-registry directly, blocking on each
+  # install handle's "closed" event — a plain headless "+qa" would quit before
+  # these async installs finish. Already-installed tools are skipped, so this is
+  # safe to re-run.
+  local mason_lua
+  mason_lua="$(mktemp --suffix=.lua)"
+  cat >"$mason_lua" <<'LUA'
+local tools = {}
+local ok_opts, opts = pcall(function() return LazyVim.opts("mason.nvim") end)
+if ok_opts and type(opts) == "table" and type(opts.ensure_installed) == "table" then
+  tools = opts.ensure_installed
+end
+if #tools == 0 then
+  io.stderr:write("ERROR: no tools found in mason.nvim ensure_installed\n")
+  vim.cmd("cq")
+  return
+end
+
+local registry = require("mason-registry")
+
+-- Make sure the registry is loaded/fresh before querying packages.
+local refreshed = false
+registry.refresh(function() refreshed = true end)
+vim.wait(120000, function() return refreshed end, 200)
+
+local pending = {}
+for _, name in ipairs(tools) do
+  local ok_pkg, pkg = pcall(registry.get_package, name)
+  if not ok_pkg then
+    io.stderr:write("WARN: unknown mason package, skipping: " .. name .. "\n")
+  elseif pkg:is_installed() then
+    io.stdout:write("  - skip (installed): " .. name .. "\n")
+  else
+    io.stdout:write("  + installing: " .. name .. "\n")
+    pending[name] = true
+    pkg:install():once("closed", function()
+      pending[name] = nil
+      io.stdout:write("  ok: " .. name .. "\n")
+    end)
+  end
+end
+
+-- Block up to 30 minutes for every install to finish.
+local finished = vim.wait(1800000, function() return vim.tbl_isempty(pending) end, 500)
+if not finished then
+  local left = {}
+  for name, _ in pairs(pending) do left[#left + 1] = name end
+  io.stderr:write("ERROR: timed out installing: " .. table.concat(left, ", ") .. "\n")
+  vim.cmd("cq")
+end
+LUA
+  _nvim_headless "+luafile $mason_lua"
+  rm -f "$mason_lua"
+  ok "Mason tools installed"
+
   note_installed "Lazy plugins (synced + compiled)"
+  note_installed "Mason tools (ensure_installed)"
 }
 
 prefetch_plugins
