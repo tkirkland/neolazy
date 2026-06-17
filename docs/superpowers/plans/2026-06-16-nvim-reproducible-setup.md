@@ -286,40 +286,50 @@ local refreshed = false
 registry.refresh(function() refreshed = true end)
 vim.wait(120000, function() return refreshed end, 200)
 
--- NOTE: corrected during implementation (commit 579424d) after debugging.
--- The original ":once('closed')" + bare is_installed() approach was broken:
--- (1) LazyVim's mason config auto-starts installs for missing ensure_installed
---     tools on plugin load, so calling Package:install() again raised
---     "Package is already installing" and aborted the script before the wait;
--- (2) is_installed() returns true mid-install (the package dir is created
---     before the download finishes), so the wait returned prematurely.
--- Verified fix: don't double-install (guard with is_installing()+pcall) and
--- block until is_installed() AND not is_installing() for every tool.
+-- NOTE: corrected across two debugging rounds (commits 579424d, then the
+-- receipt-based fix after a live-fire wipe test).
+-- Round 1: the original ":once('closed')" + bare is_installed() approach
+-- was broken because (a) LazyVim's mason config auto-starts installs on load
+-- so Package:install() raised "Package is already installing", and (b)
+-- is_installed() is true mid-install.
+-- Round 2 (found by full wipe test): an earlier headless step (Lazy sync)
+-- can leave a PARTIAL install dir (e.g. half-built venv) when it exits; the
+-- dir-based is_installed() then reports the broken package as installed and
+-- we skip it. Real "done" signal = mason-receipt.json exists. We also delete
+-- any partial dir before reinstalling so it starts clean.
+local function has_receipt(pkg)
+  return vim.loop.fs_stat(pkg:get_install_path() .. "/mason-receipt.json") ~= nil
+end
 local watch = {}
 for _, name in ipairs(tools) do
   local ok_pkg, pkg = pcall(registry.get_package, name)
   if not ok_pkg then
     io.stderr:write("WARN: unknown mason package, skipping: " .. name .. "\n")
-  elseif pkg:is_installed() and not pkg:is_installing() then
+  elseif has_receipt(pkg) and not pkg:is_installing() then
     io.stdout:write("  - skip (installed): " .. name .. "\n")
   else
     watch[name] = true
     if pkg:is_installing() then
       io.stdout:write("  ~ installing (already started): " .. name .. "\n")
     else
+      local dir = pkg:get_install_path()
+      if vim.loop.fs_stat(dir) then
+        vim.fn.delete(dir, "rf")
+        io.stdout:write("  ! cleaning partial install: " .. name .. "\n")
+      end
       io.stdout:write("  + installing: " .. name .. "\n")
       pcall(function() pkg:install() end)
     end
   end
 end
 
--- Block up to 30 minutes for every install to finish.
+-- Block up to 30 minutes until every watched tool has a receipt and is idle.
 local finished = vim.wait(1800000, function()
   for name, _ in pairs(watch) do
     local ok_pkg, pkg = pcall(registry.get_package, name)
     if not ok_pkg then
       watch[name] = nil
-    elseif pkg:is_installed() and not pkg:is_installing() then
+    elseif has_receipt(pkg) and not pkg:is_installing() then
       watch[name] = nil
     end
   end

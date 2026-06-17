@@ -597,10 +597,11 @@ LUA
 
   log "Step 4/4 — installing all Mason tools from the config (blocking)..."
   # The tool list lives in lua/plugins/mason.lua (ensure_installed). We read it
-  # back via LazyVim.opts and drive mason-registry directly, blocking on each
-  # install handle's "closed" event — a plain headless "+qa" would quit before
-  # these async installs finish. Already-installed tools are skipped, so this is
-  # safe to re-run.
+  # back via LazyVim.opts and drive mason-registry directly. A tool counts as
+  # installed only when its mason-receipt.json exists — the dir-based
+  # is_installed() reports true for partial/aborted installs (e.g. a half-built
+  # venv left by an earlier headless step), so we verify the receipt and clean
+  # any partial dir before reinstalling. Blocks until every receipt is present.
   local mason_lua
   mason_lua="$(mktemp --suffix=.lua)"
   cat >"$mason_lua" <<'LUA'
@@ -617,6 +618,14 @@ end
 
 local registry = require("mason-registry")
 
+-- A package is only TRULY installed when its mason-receipt.json exists. mason's
+-- dir-based is_installed() returns true for partial/aborted installs (e.g. a
+-- half-built venv left behind when an earlier headless step exited), which would
+-- otherwise make us skip a broken package.
+local function has_receipt(pkg)
+  return vim.loop.fs_stat(pkg:get_install_path() .. "/mason-receipt.json") ~= nil
+end
+
 -- Refresh the registry before querying/installing.
 local refreshed = false
 registry.refresh(function() refreshed = true end)
@@ -625,34 +634,40 @@ vim.wait(120000, function() return refreshed end, 200)
 -- LazyVim's own mason config auto-starts installs for missing ensure_installed
 -- tools when the plugin loads, so some packages may already be installing.
 -- Package:install() asserts "Package is already installing" on those, so only
--- start the ones that aren't, guarded with pcall. Track unfinished tools.
+-- start the ones that aren't, guarded with pcall. Remove any partial install
+-- dir (present but no receipt) first so the reinstall starts clean.
 local watch = {}
 for _, name in ipairs(tools) do
   local ok_pkg, pkg = pcall(registry.get_package, name)
   if not ok_pkg then
     io.stderr:write("WARN: unknown mason package, skipping: " .. name .. "\n")
-  elseif pkg:is_installed() and not pkg:is_installing() then
+  elseif has_receipt(pkg) and not pkg:is_installing() then
     io.stdout:write("  - skip (installed): " .. name .. "\n")
   else
     watch[name] = true
     if pkg:is_installing() then
       io.stdout:write("  ~ installing (already started): " .. name .. "\n")
     else
+      local dir = pkg:get_install_path()
+      if vim.loop.fs_stat(dir) then
+        vim.fn.delete(dir, "rf")
+        io.stdout:write("  ! cleaning partial install: " .. name .. "\n")
+      end
       io.stdout:write("  + installing: " .. name .. "\n")
       pcall(function() pkg:install() end)
     end
   end
 end
 
--- Block until every watched tool is fully done. is_installed() alone is
--- unreliable — mason creates the package directory mid-install, so it reports
--- true before the download finishes — hence we also require not is_installing().
+-- Block until every watched tool has a receipt AND is no longer installing.
+-- (Receipt, not is_installed(), because the dir appears before the install
+-- actually finishes — and persists if an install was aborted.)
 local finished = vim.wait(1800000, function()
   for name, _ in pairs(watch) do
     local ok_pkg, pkg = pcall(registry.get_package, name)
     if not ok_pkg then
       watch[name] = nil
-    elseif pkg:is_installed() and not pkg:is_installing() then
+    elseif has_receipt(pkg) and not pkg:is_installing() then
       watch[name] = nil
     end
   end
