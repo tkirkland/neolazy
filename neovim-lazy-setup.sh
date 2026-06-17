@@ -552,19 +552,22 @@ prefetch_plugins() {
     fi
   }
 
-  log "Step 1/3 — installing plugins (+Lazy! sync)..."
+  log "Step 1/4 — installing plugins (+Lazy! sync)..."
   _nvim_headless "+Lazy! sync"
   ok "Plugin sync complete"
 
-  log "Step 2/3 — compiling Tree-sitter parsers (nvim-treesitter main)..."
-  # LazyVim now tracks nvim-treesitter's `main` branch (the old `master` repo
-  # was archived 2026-04-03). `main` removed the synchronous `:TSUpdateSync`
-  # command in favour of an async Lua API, so a headless `+TSUpdateSync` now
-  # fails with "Not an editor command". For a bootstrap we must call install()
-  # and block on :wait(), or nvim quits via +qa before any parser compiles.
-  # See the nvim-treesitter README, "synchronous installation in a script
-  # context (bootstrapping)". Requires tree-sitter CLI >= 0.26.1 (installed
-  # above) and a C compiler (build-essential, installed above).
+  log "Step 2/4 — installing Tree-sitter parsers (nvim-treesitter main)..."
+  # LazyVim tracks nvim-treesitter's `main` branch, which auto-installs parsers
+  # when the plugin loads and builds them in parallel (internal MAX_JOBS, not
+  # reachable from the public install() API). On busy multi-core boxes the
+  # concurrent `tree-sitter build` processes race on a shared build scratch and
+  # fail ("parser.so not found after build attempt"). Since we can't cap that
+  # concurrency, we instead RE-RUN the load until nothing is missing: each pass
+  # leaves fewer parsers, so contention drops and the stragglers compile. This
+  # is best-effort — parsers also install on demand (one filetype at a time,
+  # contention-free) on first real use — so we never fail the bootstrap over a
+  # leftover parser. Requires tree-sitter CLI >= 0.26.1 and a C compiler (both
+  # installed above).
   local ts_lua
   ts_lua="$(mktemp --suffix=.lua)"
   cat >"$ts_lua" <<'LUA'
@@ -584,42 +587,64 @@ if not langs or #langs == 0 then
     "toml", "tsx", "typescript", "vim", "vimdoc", "yaml",
   }
 end
--- Build parsers ONE AT A TIME (max_jobs = 1). nvim-treesitter `main` compiles
--- parsers in parallel by default, and many concurrent builds race on their
--- output dir — failing with "parser.so not found after build attempt". One job
--- at a time is reliable; a one-time bootstrap can afford the extra wall-clock.
--- Then retry any stragglers (transient download/build hiccups) up to 3 passes.
+-- Loading the plugin triggers nvim-treesitter's auto-install of missing
+-- parsers. We block (vim.wait pumps the event loop so async builds progress)
+-- until all are present, or until the missing count stops changing (failed
+-- builds have settled) — then write the result to $TS_RESULT for the bash
+-- retry loop. We do NOT call install() ourselves: it would add a second
+-- concurrent builder and re-create the race.
+require("lazy").load({ plugins = { "nvim-treesitter" } })
 local nts = require("nvim-treesitter")
-local function still_missing()
+local function missing()
   local have = {}
   for _, l in ipairs(nts.get_installed()) do
     have[l] = true
   end
-  local miss = {}
+  local list = {}
   for _, l in ipairs(langs) do
     if not have[l] then
-      miss[#miss + 1] = l
+      list[#list + 1] = l
     end
   end
-  return miss
+  return list
 end
-
-local pending = langs
-for attempt = 1, 3 do
-  nts.install(pending, { max_jobs = 1 }):wait(900000)
-  pending = still_missing()
-  if #pending == 0 then
-    break
+local last, stable = -1, 0
+vim.wait(180000, function()
+  local n = #missing()
+  if n == 0 then return true end
+  if n == last then stable = stable + 1 else stable, last = 0, n end
+  return stable >= 16 -- ~8s with no change → settled
+end, 500)
+local left = missing()
+local result = (#left == 0) and "TS_DONE" or ("TS_MISSING " .. table.concat(left, ","))
+local path = os.getenv("TS_RESULT")
+if path then
+  local f = io.open(path, "w")
+  if f then
+    f:write(result .. "\n")
+    f:close()
   end
-  io.stderr:write("treesitter retry " .. attempt .. ": still missing " .. table.concat(pending, ", ") .. "\n")
 end
-if #pending > 0 then
-  io.stderr:write("WARN: parsers not installed after retries: " .. table.concat(pending, ", ") .. "\n")
-end
+io.stdout:write(result .. "\n")
 LUA
-  _nvim_headless "+luafile $ts_lua"
-  rm -f "$ts_lua"
-  ok "Tree-sitter parsers compiled"
+  local ts_result ts_done="" ts_attempt
+  ts_result="$(mktemp)"
+  export TS_RESULT="$ts_result"
+  for ts_attempt in 1 2 3 4 5; do
+    _nvim_headless "+luafile $ts_lua"
+    if grep -q "TS_DONE" "$ts_result" 2>/dev/null; then
+      ts_done=1
+      break
+    fi
+    warn "Tree-sitter pass ${ts_attempt}: parsers still missing; retrying (fewer left → less contention)..."
+  done
+  unset TS_RESULT
+  rm -f "$ts_lua" "$ts_result"
+  if [ -n "$ts_done" ]; then
+    ok "Tree-sitter parsers installed"
+  else
+    warn "Some Tree-sitter parsers remain; they will install on first use (one filetype at a time, no contention)."
+  fi
 
   log "Step 3/4 — updating Mason registry (+MasonUpdate)..."
   _nvim_headless "+MasonUpdate"
