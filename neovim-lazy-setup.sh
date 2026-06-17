@@ -4,14 +4,16 @@
 #
 # What it does:
 #   1. Sanity-checks (not root, sudo available, network up)
-#   2. Prompts to back up existing ~/.config/nvim and ~/.local/share/nvim
+#   2. Backs up existing Neovim data/state/cache (only on a fresh install; the
+#      config dir ~/.config/nvim is owned by chezmoi and is left untouched)
 #   3. apt-installs baseline build/runtime deps
 #   4. Installs rustup system-wide to /usr/local (for blink.cmp)
 #   5. Fetches latest GitHub releases for nvim, ripgrep, fd, fzf, lazygit,
 #      tree-sitter and merges them into /usr/local/{bin,share,lib}
 #   6. Installs Python and Node neovim providers (pynvim via pipx, neovim via npm -g)
-#   7. Clones LazyVim starter into ~/.config/nvim and removes its .git
-#   8. Runs `nvim --headless "+Lazy! sync" +qa` to pre-pull all plugins
+#   7. Deploys the Neovim config via chezmoi (expects ~/.config/nvim from chezmoi)
+#   8. Headless nvim: syncs plugins, compiles Tree-sitter parsers, and installs
+#      every Mason tool listed in lua/plugins/mason.lua (blocking until done)
 #
 # Run as your normal user; the script will sudo internally where needed.
 
@@ -187,11 +189,18 @@ backup_if_present() {
   fi
 }
 
-log "Checking for existing Neovim state..."
-backup_if_present "$HOME/.config/nvim"
-backup_if_present "$HOME/.local/share/nvim"
-backup_if_present "$HOME/.local/state/nvim"
-backup_if_present "$HOME/.cache/nvim"
+# The config dir (~/.config/nvim) is owned by chezmoi now — never move it.
+# Only back up Neovim's *data/state/cache* on a genuine fresh install (no nvim
+# binary yet); on a re-run these are reused, and moving them would force a
+# needless 600 MB+ re-download.
+if ! have nvim; then
+  log "Fresh install detected — backing up any stale Neovim data/state..."
+  backup_if_present "$HOME/.local/share/nvim"
+  backup_if_present "$HOME/.local/state/nvim"
+  backup_if_present "$HOME/.cache/nvim"
+else
+  skip "nvim already installed — leaving existing config/data in place"
+fi
 
 # ---------- apt packages -----------------------------------------------------
 
@@ -494,23 +503,38 @@ install_node_neovim() {
 
 install_node_neovim
 
-# ---------- LazyVim starter --------------------------------------------------
+# ---------- Deploy config from chezmoi --------------------------------------
 
-install_starter() {
-  if [ -d "$HOME/.config/nvim" ]; then
-    skip "$HOME/.config/nvim already exists; skipping starter clone"
-    note_skipped "LazyVim starter"
+# The Neovim config is owned by chezmoi (dot_config/nvim). Ensure it is applied
+# so ~/.config/nvim exists before we sync plugins / install tools. If chezmoi
+# isn't installed or initialized, fail loudly with guidance rather than silently
+# falling back to a vanilla starter (which would not reproduce this setup).
+deploy_config() {
+  if [ -d "$HOME/.config/nvim" ] && [ -f "$HOME/.config/nvim/lua/plugins/mason.lua" ]; then
+    skip "$HOME/.config/nvim already present (mason.lua found)"
+    note_skipped "nvim config (already deployed)"
     return 0
   fi
-  log "Cloning LazyVim starter to ~/.config/nvim..."
-  mkdir -p "$HOME/.config"
-  git clone --depth=1 https://github.com/LazyVim/starter "$HOME/.config/nvim"
-  rm -rf "$HOME/.config/nvim/.git"
-  ok "LazyVim starter cloned (.git removed)"
-  note_installed "LazyVim starter"
+
+  if have chezmoi; then
+    log "Applying Neovim config via chezmoi..."
+    chezmoi apply --force "$HOME/.config/nvim" || true
+  fi
+
+  if [ ! -f "$HOME/.config/nvim/lua/plugins/mason.lua" ]; then
+    err "Neovim config not found at ~/.config/nvim (expected it from chezmoi)."
+    if have chezmoi; then
+      err "chezmoi is installed but has not applied it. Run: chezmoi init --apply <your-dotfiles-repo>"
+    else
+      err "chezmoi is not installed. Install chezmoi, then run: chezmoi init --apply <your-dotfiles-repo>"
+    fi
+    exit 1
+  fi
+  ok "Neovim config deployed (~/.config/nvim)"
+  note_installed "nvim config (chezmoi)"
 }
 
-install_starter
+deploy_config
 
 # ---------- Pre-pull plugins via headless lazy sync --------------------------
 
@@ -567,11 +591,102 @@ LUA
   rm -f "$ts_lua"
   ok "Tree-sitter parsers compiled"
 
-  log "Step 3/3 — updating Mason registry (+MasonUpdate)..."
+  log "Step 3/4 — updating Mason registry (+MasonUpdate)..."
   _nvim_headless "+MasonUpdate"
   ok "Mason registry updated"
 
+  log "Step 4/4 — installing all Mason tools from the config (blocking)..."
+  # The tool list lives in lua/plugins/mason.lua (ensure_installed). We read it
+  # back via LazyVim.opts and drive mason-registry directly. A tool counts as
+  # installed only when its mason-receipt.json exists — the dir-based
+  # is_installed() reports true for partial/aborted installs (e.g. a half-built
+  # venv left by an earlier headless step), so we verify the receipt and clean
+  # any partial dir before reinstalling. Blocks until every receipt is present.
+  local mason_lua
+  mason_lua="$(mktemp --suffix=.lua)"
+  cat >"$mason_lua" <<'LUA'
+local tools = {}
+local ok_opts, opts = pcall(function() return LazyVim.opts("mason.nvim") end)
+if ok_opts and type(opts) == "table" and type(opts.ensure_installed) == "table" then
+  tools = opts.ensure_installed
+end
+if #tools == 0 then
+  io.stderr:write("ERROR: no tools found in mason.nvim ensure_installed\n")
+  vim.cmd("cq")
+  return
+end
+
+local registry = require("mason-registry")
+
+-- A package is only TRULY installed when its mason-receipt.json exists. mason's
+-- dir-based is_installed() returns true for partial/aborted installs (e.g. a
+-- half-built venv left behind when an earlier headless step exited), which would
+-- otherwise make us skip a broken package.
+local function has_receipt(pkg)
+  return vim.loop.fs_stat(pkg:get_install_path() .. "/mason-receipt.json") ~= nil
+end
+
+-- Refresh the registry before querying/installing.
+local refreshed = false
+registry.refresh(function() refreshed = true end)
+vim.wait(120000, function() return refreshed end, 200)
+
+-- LazyVim's own mason config auto-starts installs for missing ensure_installed
+-- tools when the plugin loads, so some packages may already be installing.
+-- Package:install() asserts "Package is already installing" on those, so only
+-- start the ones that aren't, guarded with pcall. Remove any partial install
+-- dir (present but no receipt) first so the reinstall starts clean.
+local watch = {}
+for _, name in ipairs(tools) do
+  local ok_pkg, pkg = pcall(registry.get_package, name)
+  if not ok_pkg then
+    io.stderr:write("WARN: unknown mason package, skipping: " .. name .. "\n")
+  elseif has_receipt(pkg) and not pkg:is_installing() then
+    io.stdout:write("  - skip (installed): " .. name .. "\n")
+  else
+    watch[name] = true
+    if pkg:is_installing() then
+      io.stdout:write("  ~ installing (already started): " .. name .. "\n")
+    else
+      local dir = pkg:get_install_path()
+      if vim.loop.fs_stat(dir) then
+        vim.fn.delete(dir, "rf")
+        io.stdout:write("  ! cleaning partial install: " .. name .. "\n")
+      end
+      io.stdout:write("  + installing: " .. name .. "\n")
+      pcall(function() pkg:install() end)
+    end
+  end
+end
+
+-- Block until every watched tool has a receipt AND is no longer installing.
+-- (Receipt, not is_installed(), because the dir appears before the install
+-- actually finishes — and persists if an install was aborted.)
+local finished = vim.wait(1800000, function()
+  for name, _ in pairs(watch) do
+    local ok_pkg, pkg = pcall(registry.get_package, name)
+    if not ok_pkg then
+      watch[name] = nil
+    elseif has_receipt(pkg) and not pkg:is_installing() then
+      watch[name] = nil
+    end
+  end
+  return next(watch) == nil
+end, 500)
+
+if not finished then
+  local left = {}
+  for name, _ in pairs(watch) do left[#left + 1] = name end
+  io.stderr:write("ERROR: timed out installing: " .. table.concat(left, ", ") .. "\n")
+  vim.cmd("cq")
+end
+LUA
+  _nvim_headless "+luafile $mason_lua"
+  rm -f "$mason_lua"
+  ok "Mason tools installed"
+
   note_installed "Lazy plugins (synced + compiled)"
+  note_installed "Mason tools (ensure_installed)"
 }
 
 prefetch_plugins
