@@ -552,11 +552,11 @@ prefetch_plugins() {
     fi
   }
 
-  log "Step 1/4 — installing plugins (+Lazy! sync)..."
+  log "Step 1/3 — installing plugins (+Lazy! sync)..."
   _nvim_headless "+Lazy! sync"
   ok "Plugin sync complete"
 
-  log "Step 2/4 — installing Tree-sitter parsers (nvim-treesitter main)..."
+  log "Step 2/3 — installing Tree-sitter parsers (nvim-treesitter main)..."
   # LazyVim tracks nvim-treesitter's `main` branch, which auto-installs parsers
   # when the plugin loads and builds them in parallel (internal MAX_JOBS, not
   # reachable from the public install() API). On busy multi-core boxes the
@@ -631,7 +631,9 @@ LUA
   ts_result="$(mktemp)"
   export TS_RESULT="$ts_result"
   for ts_attempt in 1 2 3 4 5; do
-    _nvim_headless "+luafile $ts_lua"
+    # Output silenced: nvim-treesitter's per-parser progress/build lines are
+    # very noisy. The pass result is communicated via $ts_result, not stdout.
+    _nvim_headless "+luafile $ts_lua" >/dev/null 2>&1
     if grep -q "TS_DONE" "$ts_result" 2>/dev/null; then
       ts_done=1
       break
@@ -646,11 +648,11 @@ LUA
     warn "Some Tree-sitter parsers remain; they will install on first use (one filetype at a time, no contention)."
   fi
 
-  log "Step 3/4 — updating Mason registry (+MasonUpdate)..."
-  _nvim_headless "+MasonUpdate"
-  ok "Mason registry updated"
+  # (No separate "MasonUpdate" step: that Ex command isn't registered in a
+  # headless session — it errored with E492 — and it's redundant anyway, since
+  # the install step below calls mason-registry.refresh() itself.)
 
-  log "Step 4/4 — installing all Mason tools from the config (blocking)..."
+  log "Step 3/3 — installing all Mason tools from the config (blocking)..."
   # The tool list lives in lua/plugins/mason.lua (ensure_installed). We read it
   # back via LazyVim.opts and drive mason-registry directly. A tool counts as
   # installed only when its mason-receipt.json exists — the dir-based
