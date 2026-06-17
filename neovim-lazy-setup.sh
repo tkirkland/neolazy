@@ -10,8 +10,9 @@
 #   5. Fetches latest GitHub releases for nvim, ripgrep, fd, fzf, lazygit,
 #      tree-sitter and merges them into /usr/local/{bin,share,lib}
 #   6. Installs Python and Node neovim providers (pynvim via pipx, neovim via npm -g)
-#   7. Clones LazyVim starter into ~/.config/nvim and removes its .git
-#   8. Runs `nvim --headless "+Lazy! sync" +qa` to pre-pull all plugins
+#   7. Deploys the Neovim config via chezmoi (expects ~/.config/nvim from chezmoi)
+#   8. Headless nvim: syncs plugins, compiles Tree-sitter parsers, and installs
+#      every Mason tool listed in lua/plugins/mason.lua (blocking until done)
 #
 # Run as your normal user; the script will sudo internally where needed.
 
