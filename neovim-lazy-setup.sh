@@ -611,33 +611,51 @@ end
 
 local registry = require("mason-registry")
 
--- Make sure the registry is loaded/fresh before querying packages.
+-- Refresh the registry before querying/installing.
 local refreshed = false
 registry.refresh(function() refreshed = true end)
 vim.wait(120000, function() return refreshed end, 200)
 
-local pending = {}
+-- LazyVim's own mason config auto-starts installs for missing ensure_installed
+-- tools when the plugin loads, so some packages may already be installing.
+-- Package:install() asserts "Package is already installing" on those, so only
+-- start the ones that aren't, guarded with pcall. Track unfinished tools.
+local watch = {}
 for _, name in ipairs(tools) do
   local ok_pkg, pkg = pcall(registry.get_package, name)
   if not ok_pkg then
     io.stderr:write("WARN: unknown mason package, skipping: " .. name .. "\n")
-  elseif pkg:is_installed() then
+  elseif pkg:is_installed() and not pkg:is_installing() then
     io.stdout:write("  - skip (installed): " .. name .. "\n")
   else
-    io.stdout:write("  + installing: " .. name .. "\n")
-    pending[name] = true
-    pkg:install():once("closed", function()
-      pending[name] = nil
-      io.stdout:write("  ok: " .. name .. "\n")
-    end)
+    watch[name] = true
+    if pkg:is_installing() then
+      io.stdout:write("  ~ installing (already started): " .. name .. "\n")
+    else
+      io.stdout:write("  + installing: " .. name .. "\n")
+      pcall(function() pkg:install() end)
+    end
   end
 end
 
--- Block up to 30 minutes for every install to finish.
-local finished = vim.wait(1800000, function() return vim.tbl_isempty(pending) end, 500)
+-- Block until every watched tool is fully done. is_installed() alone is
+-- unreliable — mason creates the package directory mid-install, so it reports
+-- true before the download finishes — hence we also require not is_installing().
+local finished = vim.wait(1800000, function()
+  for name, _ in pairs(watch) do
+    local ok_pkg, pkg = pcall(registry.get_package, name)
+    if not ok_pkg then
+      watch[name] = nil
+    elseif pkg:is_installed() and not pkg:is_installing() then
+      watch[name] = nil
+    end
+  end
+  return next(watch) == nil
+end, 500)
+
 if not finished then
   local left = {}
-  for name, _ in pairs(pending) do left[#left + 1] = name end
+  for name, _ in pairs(watch) do left[#left + 1] = name end
   io.stderr:write("ERROR: timed out installing: " .. table.concat(left, ", ") .. "\n")
   vim.cmd("cq")
 end
