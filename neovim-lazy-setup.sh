@@ -4,7 +4,8 @@
 #
 # What it does:
 #   1. Sanity-checks (not root, sudo available, network up)
-#   2. Prompts to back up existing ~/.config/nvim and ~/.local/share/nvim
+#   2. Backs up existing Neovim data/state/cache (only on a fresh install; the
+#      config dir ~/.config/nvim is owned by chezmoi and is left untouched)
 #   3. apt-installs baseline build/runtime deps
 #   4. Installs rustup system-wide to /usr/local (for blink.cmp)
 #   5. Fetches latest GitHub releases for nvim, ripgrep, fd, fzf, lazygit,
@@ -517,12 +518,16 @@ deploy_config() {
 
   if have chezmoi; then
     log "Applying Neovim config via chezmoi..."
-    chezmoi apply --force "$HOME/.config/nvim"
+    chezmoi apply --force "$HOME/.config/nvim" || true
   fi
 
   if [ ! -f "$HOME/.config/nvim/lua/plugins/mason.lua" ]; then
     err "Neovim config not found at ~/.config/nvim (expected it from chezmoi)."
-    err "Run 'chezmoi init --apply <your-dotfiles-repo>' first, then re-run this script."
+    if have chezmoi; then
+      err "chezmoi is installed but has not applied it. Run: chezmoi init --apply <your-dotfiles-repo>"
+    else
+      err "chezmoi is not installed. Install chezmoi, then run: chezmoi init --apply <your-dotfiles-repo>"
+    fi
     exit 1
   fi
   ok "Neovim config deployed (~/.config/nvim)"
