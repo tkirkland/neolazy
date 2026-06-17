@@ -501,23 +501,34 @@ install_node_neovim() {
 
 install_node_neovim
 
-# ---------- LazyVim starter --------------------------------------------------
+# ---------- Deploy config from chezmoi --------------------------------------
 
-install_starter() {
-  if [ -d "$HOME/.config/nvim" ]; then
-    skip "$HOME/.config/nvim already exists; skipping starter clone"
-    note_skipped "LazyVim starter"
+# The Neovim config is owned by chezmoi (dot_config/nvim). Ensure it is applied
+# so ~/.config/nvim exists before we sync plugins / install tools. If chezmoi
+# isn't installed or initialized, fail loudly with guidance rather than silently
+# falling back to a vanilla starter (which would not reproduce this setup).
+deploy_config() {
+  if [ -d "$HOME/.config/nvim" ] && [ -f "$HOME/.config/nvim/lua/plugins/mason.lua" ]; then
+    skip "$HOME/.config/nvim already present (mason.lua found)"
+    note_skipped "nvim config (already deployed)"
     return 0
   fi
-  log "Cloning LazyVim starter to ~/.config/nvim..."
-  mkdir -p "$HOME/.config"
-  git clone --depth=1 https://github.com/LazyVim/starter "$HOME/.config/nvim"
-  rm -rf "$HOME/.config/nvim/.git"
-  ok "LazyVim starter cloned (.git removed)"
-  note_installed "LazyVim starter"
+
+  if have chezmoi; then
+    log "Applying Neovim config via chezmoi..."
+    chezmoi apply --force "$HOME/.config/nvim"
+  fi
+
+  if [ ! -f "$HOME/.config/nvim/lua/plugins/mason.lua" ]; then
+    err "Neovim config not found at ~/.config/nvim (expected it from chezmoi)."
+    err "Run 'chezmoi init --apply <your-dotfiles-repo>' first, then re-run this script."
+    exit 1
+  fi
+  ok "Neovim config deployed (~/.config/nvim)"
+  note_installed "nvim config (chezmoi)"
 }
 
-install_starter
+deploy_config
 
 # ---------- Pre-pull plugins via headless lazy sync --------------------------
 
