@@ -584,8 +584,38 @@ if not langs or #langs == 0 then
     "toml", "tsx", "typescript", "vim", "vimdoc", "yaml",
   }
 end
--- install() runs asynchronously; block up to 10 minutes for parsers to build.
-require("nvim-treesitter").install(langs):wait(600000)
+-- Build parsers ONE AT A TIME (max_jobs = 1). nvim-treesitter `main` compiles
+-- parsers in parallel by default, and many concurrent builds race on their
+-- output dir — failing with "parser.so not found after build attempt". One job
+-- at a time is reliable; a one-time bootstrap can afford the extra wall-clock.
+-- Then retry any stragglers (transient download/build hiccups) up to 3 passes.
+local nts = require("nvim-treesitter")
+local function still_missing()
+  local have = {}
+  for _, l in ipairs(nts.get_installed()) do
+    have[l] = true
+  end
+  local miss = {}
+  for _, l in ipairs(langs) do
+    if not have[l] then
+      miss[#miss + 1] = l
+    end
+  end
+  return miss
+end
+
+local pending = langs
+for attempt = 1, 3 do
+  nts.install(pending, { max_jobs = 1 }):wait(900000)
+  pending = still_missing()
+  if #pending == 0 then
+    break
+  end
+  io.stderr:write("treesitter retry " .. attempt .. ": still missing " .. table.concat(pending, ", ") .. "\n")
+end
+if #pending > 0 then
+  io.stderr:write("WARN: parsers not installed after retries: " .. table.concat(pending, ", ") .. "\n")
+end
 LUA
   _nvim_headless "+luafile $ts_lua"
   rm -f "$ts_lua"
