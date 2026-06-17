@@ -187,11 +187,18 @@ backup_if_present() {
   fi
 }
 
-log "Checking for existing Neovim state..."
-backup_if_present "$HOME/.config/nvim"
-backup_if_present "$HOME/.local/share/nvim"
-backup_if_present "$HOME/.local/state/nvim"
-backup_if_present "$HOME/.cache/nvim"
+# The config dir (~/.config/nvim) is owned by chezmoi now — never move it.
+# Only back up Neovim's *data/state/cache* on a genuine fresh install (no nvim
+# binary yet); on a re-run these are reused, and moving them would force a
+# needless 600 MB+ re-download.
+if ! have nvim; then
+  log "Fresh install detected — backing up any stale Neovim data/state..."
+  backup_if_present "$HOME/.local/share/nvim"
+  backup_if_present "$HOME/.local/state/nvim"
+  backup_if_present "$HOME/.cache/nvim"
+else
+  skip "nvim already installed — leaving existing config/data in place"
+fi
 
 # ---------- apt packages -----------------------------------------------------
 
